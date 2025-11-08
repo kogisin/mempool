@@ -11,6 +11,7 @@ import auditReplicator from './replication/AuditReplication';
 import statisticsReplicator from './replication/StatisticsReplication';
 import AccelerationRepository from './repositories/AccelerationRepository';
 import BlocksAuditsRepository from './repositories/BlocksAuditsRepository';
+import BlocksRepository from './repositories/BlocksRepository';
 
 export interface CoreIndex {
   name: string;
@@ -119,7 +120,7 @@ class Indexer {
 
     switch (task) {
       case 'blocksPrices': {
-        if (!['testnet', 'signet'].includes(config.MEMPOOL.NETWORK) && config.FIAT_PRICE.ENABLED) {
+        if (!['testnet', 'signet', 'testnet4'].includes(config.MEMPOOL.NETWORK) && config.FIAT_PRICE.ENABLED) {
           let lastestPriceId;
           try {
             lastestPriceId = await PricesRepository.$getLatestPriceId();
@@ -137,7 +138,11 @@ class Indexer {
 
       case 'coinStatsIndex': {
         logger.debug(`Indexing coinStatsIndex now`);
-        await mining.$indexCoinStatsIndex();
+        try {
+          await mining.$indexCoinStatsIndex();
+        } catch (e) {
+          logger.debug(`failed to index coinstatsindex: ` + (e instanceof Error ? e.message : e));
+        }
       } break;
     }
 
@@ -194,6 +199,7 @@ class Indexer {
       await statisticsReplicator.$sync();
       await AccelerationRepository.$indexPastAccelerations();
       await BlocksAuditsRepository.$migrateAuditsV0toV1();
+      await BlocksRepository.$migrateBlocks();
       // do not wait for classify blocks to finish
       blocks.$classifyBlocks();
     } catch (e) {

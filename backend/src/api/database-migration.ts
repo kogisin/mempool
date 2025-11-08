@@ -7,7 +7,7 @@ import cpfpRepository from '../repositories/CpfpRepository';
 import { RowDataPacket } from 'mysql2';
 
 class DatabaseMigration {
-  private static currentVersion = 97;
+  private static currentVersion = 104;
   private queryTimeout = 3600_000;
   private statisticsAddedIndexed = false;
   private uniqueLogs: string[] = [];
@@ -104,7 +104,7 @@ class DatabaseMigration {
   private async $createMissingTablesAndIndexes(databaseSchemaVersion: number) {
     await this.$setStatisticsAddedIndexedFlag(databaseSchemaVersion);
 
-    const isBitcoin = ['mainnet', 'testnet', 'signet'].includes(config.MEMPOOL.NETWORK);
+    const isBitcoin = ['mainnet', 'testnet', 'signet', 'testnet4'].includes(config.MEMPOOL.NETWORK);
 
     await this.$executeQuery(this.getCreateElementsTableQuery(), await this.$checkIfTableExists('elements_pegs'));
     await this.$executeQuery(this.getCreateStatisticsQuery(), await this.$checkIfTableExists('statistics'));
@@ -1146,6 +1146,38 @@ class DatabaseMigration {
       await this.$executeQuery(`ALTER TABLE blocks MODIFY COLUMN definition_hash varchar(255) NULL DEFAULT "${poolJsonSha}"`);
       await this.updateToSchemaVersion(97);
     }
+
+    // reindex mainnet Goggles flags for mined block templates above height 896070
+    // (since the first annex transaction at height 896071)
+    // (safe to make this conditional on the network since it doesn't change the database schema)
+    if (databaseSchemaVersion < 98 && config.MEMPOOL.NETWORK === 'mainnet') {
+      await this.$executeQuery('UPDATE blocks_summaries SET version = 0 WHERE height >= 896070;');
+      await this.updateToSchemaVersion(98);
+    }
+
+    // Add vsize_0 to statistics table
+    if (databaseSchemaVersion < 99) {
+      await this.$executeQuery('ALTER TABLE statistics ADD COLUMN vsize_0 int(11) NOT NULL DEFAULT 0');
+      await this.updateToSchemaVersion(99);
+    }
+
+    // Add "block indexed at version" index_version column to the blocks table
+    // to be used for lazy migrations & reindexing tasks
+    if (databaseSchemaVersion < 100) {
+      await this.$executeQuery('ALTER TABLE `blocks` ADD index_version INT NOT NULL DEFAULT 0');
+      await this.$executeQuery('ALTER TABLE `blocks` ADD INDEX `index_version` (`index_version`)');
+      await this.updateToSchemaVersion(100);
+    }
+
+    if (databaseSchemaVersion < 102) {
+      await this.$executeQuery('ALTER TABLE `blocks` ADD stale BOOL NOT NULL DEFAULT 0');
+      await this.updateToSchemaVersion(102);
+    }
+
+    if (databaseSchemaVersion < 103) {
+      await this.$executeQuery('ALTER TABLE `blocks` ADD INDEX `stale` (`stale`)');
+      await this.updateToSchemaVersion(103);
+    }
   }
 
   /**
@@ -1254,7 +1286,7 @@ class DatabaseMigration {
    */
   private getMigrationQueriesFromVersion(version: number): string[] {
     const queries: string[] = [];
-    const isBitcoin = ['mainnet', 'testnet', 'signet'].includes(config.MEMPOOL.NETWORK);
+    const isBitcoin = ['mainnet', 'testnet', 'signet', 'testnet4'].includes(config.MEMPOOL.NETWORK);
 
     if (version < 1) {
       if (config.MEMPOOL.NETWORK !== 'liquid' && config.MEMPOOL.NETWORK !== 'liquidtestnet') {
@@ -1276,6 +1308,16 @@ class DatabaseMigration {
     if (version < 58) {
       queries.push(`DELETE FROM state WHERE name = 'last_hashrates_indexing'`);
       queries.push(`DELETE FROM state WHERE name = 'last_weekly_hashrates_indexing'`);
+    }
+
+    if (version < 101) {
+      queries.push(`DELETE FROM prices WHERE USD = -1`);
+    }
+
+    if (version < 104) {
+      queries.push(`ALTER TABLE blocks DROP PRIMARY KEY`);
+      queries.push(`ALTER TABLE blocks ADD PRIMARY KEY (hash)`);
+      queries.push(`ALTER TABLE blocks ADD INDEX (height)`);
     }
 
     return queries;

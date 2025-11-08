@@ -26,9 +26,19 @@ interface Wallet {
   lastPoll: number;
 }
 
+interface Treasury {
+  id: number,
+  name: string,
+  wallet: string,
+  enterprise: string,
+  verifiedAddresses: string[],
+  balances: { balance: number, time: number }[], // off-chain balances
+}
+
 const POLL_FREQUENCY = 5 * 60 * 1000; // 5 minutes
 
 class WalletApi {
+  private treasuries: Treasury[] = [];
   private wallets: Record<string, Wallet> = {};
   private syncing = false;
   private lastSync = 0;
@@ -65,6 +75,8 @@ class WalletApi {
       }
 
       this.wallets = data.wallets;
+      this.treasuries = data.treasuries || [];
+
       // Reset lastSync time to force transaction history refresh
       for (const wallet of Object.values(this.wallets)) {
         wallet.lastPoll = 0;
@@ -90,6 +102,7 @@ class WalletApi {
       const cacheData = {
         cacheSchemaVersion: this.cacheSchemaVersion,
         wallets: this.wallets,
+        treasuries: this.treasuries,
       };
 
       await fsPromises.writeFile(
@@ -126,6 +139,14 @@ class WalletApi {
     }
   }
 
+  public getWallets(): string[] {
+    return Object.keys(this.wallets);
+  }
+
+  public getTreasuries(): Treasury[] {
+    return this.treasuries?.filter(treasury => !!this.wallets[treasury.wallet]) || [];
+  }
+
   // resync wallet addresses from the services backend
   async $syncWallets(): Promise<void> {
     if (!config.WALLETS.ENABLED || this.syncing) {
@@ -158,8 +179,33 @@ class WalletApi {
             }
           }
         }
+
+        // update list of treasuries
+        const treasuriesResponse = await axios.get(config.MEMPOOL_SERVICES.API + `/treasuries`);
+        this.treasuries = treasuriesResponse.data || [];
       } catch (e) {
         logger.err(`Error updating active wallets: ${(e instanceof Error ? e.message : e)}`);
+      }
+
+      try {
+        // update list of active treasuries
+        this.lastSync = Date.now();
+        const response = await axios.get(config.MEMPOOL_SERVICES.API + `/treasuries`);
+        const treasuries: Treasury[] = response.data;
+        if (treasuries) {
+          this.treasuries = treasuries;
+        }
+      } catch (e) {
+        logger.err(`Error updating active treasuries: ${(e instanceof Error ? e.message : e)}`);
+      }
+
+      // insert dummy address data to represent off-chain balance history
+      for (const treasury of this.treasuries) {
+        if (treasury.balances?.length) {
+          if (this.wallets[treasury.wallet]) {
+            this.wallets[treasury.wallet].addresses['private'] = convertBalancesToWalletAddress(treasury.wallet, treasury.balances);
+          }
+        }
       }
     }
 
@@ -176,7 +222,7 @@ class WalletApi {
           }
           // remove old addresses
           for (const address of Object.keys(wallet.addresses)) {
-            if (!addresses[address]) {
+            if (address !== 'private' && !addresses[address]) {
               delete wallet.addresses[address];
             }
           }
@@ -267,6 +313,36 @@ class WalletApi {
     }
     return walletTransactions;
   }
+}
+
+function convertBalancesToWalletAddress(wallet: string, balances: { balance: number, time: number }[]): WalletAddress {
+  // represent the off-chain balance as a series of transactions modifying a single notional UTXO
+  const sortedBalances = balances.sort((a, b) => a.time - b.time);
+  const walletAddress: WalletAddress = {
+    address: 'private',
+    active: false,
+    stats: {
+      funded_txo_count: 0,
+      funded_txo_sum: sortedBalances[sortedBalances.length - 1].balance,
+      spent_txo_count: 0,
+      spent_txo_sum: 0,
+      tx_count: 0,
+    },
+    transactions: [],
+    lastSync: sortedBalances[sortedBalances.length - 1].time,
+  };
+  let lastBalance = 0;
+  for (const [index, entry] of sortedBalances.entries()) {
+    const diff = entry.balance - lastBalance;
+    walletAddress.transactions.push({
+      txid: `${wallet}-private-${index}`,
+      value: diff,
+      height: index,
+      time: entry.time,
+    });
+    lastBalance = entry.balance;
+  }
+  return walletAddress;
 }
 
 export default new WalletApi();
